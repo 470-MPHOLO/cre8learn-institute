@@ -9,7 +9,6 @@ import time
 import re
 from io import BytesIO
 import sqlite3
-import tempfile
 
 # Page configuration
 st.set_page_config(
@@ -74,6 +73,22 @@ st.markdown("""
         text-align: center;
         border: 2px solid #1E90FF;
         box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+    .verified-badge {
+        background: #28a745;
+        color: white;
+        padding: 0.2rem 0.8rem;
+        border-radius: 15px;
+        font-size: 0.8rem;
+        font-weight: bold;
+    }
+    .unverified-badge {
+        background: #dc3545;
+        color: white;
+        padding: 0.2rem 0.8rem;
+        border-radius: 15px;
+        font-size: 0.8rem;
+        font-weight: bold;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -177,8 +192,19 @@ class StudentManager:
         return f"{random.randint(100000, 999999)}"
     
     def verify_email_format(self, email):
-        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        return re.match(pattern, email) is not None
+        # Simple but effective email validation
+        if not email or '@' not in email or '.' not in email:
+            return False
+        
+        parts = email.split('@')
+        if len(parts) != 2 or not parts[0]:
+            return False
+            
+        domain_parts = parts[1].split('.')
+        if len(domain_parts) < 2 or not all(domain_parts):
+            return False
+            
+        return True
     
     def save_verification_code(self, email, code):
         cursor = self.conn.cursor()
@@ -222,7 +248,7 @@ class StudentManager:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             student_id, name, age, email, phone, 
-            json.dumps(courses),  # Store list as JSON string
+            json.dumps(courses),
             datetime.now().isoformat(),
             'Active',
             json.dumps({course: 'Not Assessed' for course in courses}),
@@ -362,7 +388,157 @@ class CourseManager:
         return cursor.rowcount > 0
 
 class QuizManager:
-     # ADMIN SECTIONS
+    def __init__(self):
+        self.conn = DB_CONN
+    
+    def create_quiz(self, quiz_id, title, course, duration, questions):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO quizzes (quiz_id, title, course, duration, questions, created_date, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (quiz_id, title, course, duration, json.dumps(questions), datetime.now().isoformat(), True))
+        self.conn.commit()
+    
+    def get_quizzes(self, course=None, active_only=True):
+        cursor = self.conn.cursor()
+        if course:
+            if active_only:
+                cursor.execute("SELECT * FROM quizzes WHERE course = ? AND is_active = TRUE ORDER BY created_date DESC", (course,))
+            else:
+                cursor.execute("SELECT * FROM quizzes WHERE course = ? ORDER BY created_date DESC", (course,))
+        else:
+            if active_only:
+                cursor.execute("SELECT * FROM quizzes WHERE is_active = TRUE ORDER BY created_date DESC")
+            else:
+                cursor.execute("SELECT * FROM quizzes ORDER BY created_date DESC")
+        
+        quizzes = []
+        for row in cursor.fetchall():
+            quizzes.append({
+                'quiz_id': row[0],
+                'title': row[1],
+                'course': row[2],
+                'duration': row[3],
+                'questions': json.loads(row[4]),
+                'created_date': row[5],
+                'is_active': bool(row[6])
+            })
+        return quizzes
+    
+    def save_quiz_result(self, quiz_id, student_id, score, total_questions, answers):
+        percentage = (score / total_questions) * 100
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO quiz_results 
+            (quiz_id, student_id, score, total_questions, percentage, completed_date, answers)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (quiz_id, student_id, score, total_questions, percentage, datetime.now().isoformat(), json.dumps(answers)))
+        self.conn.commit()
+        return cursor.lastrowid
+    
+    def get_student_results(self, student_id):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT qr.*, q.title, q.course 
+            FROM quiz_results qr
+            JOIN quizzes q ON qr.quiz_id = q.quiz_id
+            WHERE qr.student_id = ?
+            ORDER BY qr.completed_date DESC
+        ''', (student_id,))
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                'quiz_id': row[1],
+                'student_id': row[2],
+                'score': row[3],
+                'total_questions': row[4],
+                'percentage': row[5],
+                'completed_date': row[6],
+                'quiz_title': row[8],
+                'course': row[9]
+            })
+        return results
+
+def create_logo():
+    st.markdown("""
+    <div class="logo-container">
+        <div class="main-logo">Cre8Learn</div>
+        <div class="institute-subtitle">INSTITUTE</div>
+        <div style="font-size: 1.3rem; margin-bottom: 0.5rem; opacity: 0.9;">
+            Maseru, Lesotho
+        </div>
+        <div style="font-size: 1rem; opacity: 0.8;">
+            Business Registration No: A2025/28312
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+def admin_login():
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Admin Access")
+    
+    if not st.session_state.get('admin_logged_in', False):
+        password = st.sidebar.text_input("Admin Password", type="password", value="cre8learn2024")
+        if st.sidebar.button("Login as Admin"):
+            if password == "cre8learn2024":
+                st.session_state.admin_logged_in = True
+                st.rerun()
+            else:
+                st.sidebar.error("Incorrect password")
+        return False
+    else:
+        st.sidebar.success("✅ Admin Mode")
+        if st.sidebar.button("Logout"):
+            st.session_state.admin_logged_in = False
+            st.rerun()
+        return True
+
+def main():
+    # Initialize managers
+    student_manager = StudentManager()
+    course_manager = CourseManager()
+    quiz_manager = QuizManager()
+    
+    is_admin = admin_login()
+    create_logo()
+    
+    # Courses list
+    COURSES = [
+        "Engineering Mathematics (Number Systems & Logic)",
+        "Computer Hardware Basics", 
+        "Windows Operating System Fundamentals",
+        "Cybersecurity 1: Fundamentals, Threats & Tools",
+        "Leadership, Ethics & Professional Workplace Etiquette",
+        "Introduction to Computer Networking",
+        "C++ 1: Introductory Programming",
+        "Introduction to Programming & Computational Thinking",
+        "Proficiency in English Language"
+    ]
+    
+    # Navigation
+    if is_admin:
+        menu = [
+            "🏠 Admin Dashboard",
+            "➕ Register Student", 
+            "👥 Student Management",
+            "📚 Course Materials",
+            "🎯 Quiz Management",
+            "📊 Analytics & Reports"
+        ]
+    else:
+        menu = [
+            "🏠 Student Portal",
+            "🔍 My Profile & Courses", 
+            "📖 Learning Materials",
+            "🎯 Take Quiz",
+            "📊 My Results",
+            "📞 Contact Support"
+        ]
+    
+    choice = st.sidebar.selectbox("Menu", menu)
+    
+    # ADMIN SECTIONS
     if is_admin:
         if choice == "🏠 Admin Dashboard":
             st.subheader("📊 Admin Dashboard")
@@ -389,19 +565,13 @@ class QuizManager:
                 st.subheader("Recent Registrations")
                 recent_students = sorted(students, key=lambda x: x['registration_date'], reverse=True)[:5]
                 for student in recent_students:
-                    st.write(f"**{student['name']}** ({student['student_id']}) - {student['registration_date'][:10]}")
-            
-            with col2:
-                st.subheader("System Status")
-                st.success("✅ Database: Connected")
-                st.success("✅ File System: Ready")
-                st.success("✅ Email System: Standby")
-                st.success("✅ Quiz Engine: Active")
+                    verified_status = "✅" if student['email_verified'] else "❌"
+                    st.write(f"**{student['name']}** ({student['student_id']}) {verified_status}")
 
-        elif choice == "➕ Register Student":  # ✅ FIXED: Added colon and proper indentation
+        elif choice == "➕ Register Student":
             st.subheader("Register New Student")
             
-            with st.form("add_student_form", clear_on_submit=True):
+            with st.form("add_student_form"):
                 col1, col2 = st.columns(2)
                 
                 with col1:
@@ -412,7 +582,7 @@ class QuizManager:
                 with col2:
                     phone = st.text_input("Phone Number *")
                     selected_courses = st.multiselect("Select Courses *", COURSES)
-                    status = st.selectbox("Status", ["Active", "Inactive"])
+                    auto_verify = st.checkbox("Auto-verify email", value=True)
                 
                 submitted = st.form_submit_button("🎯 Register Student")
                 
@@ -421,69 +591,66 @@ class QuizManager:
                         if not student_manager.verify_email_format(email):
                             st.error("❌ Please enter a valid email address!")
                         else:
-                            # ✅ FIX: REGISTER STUDENT FIRST
+                            # REGISTER STUDENT FIRST
                             student_id = student_manager.add_student(name, age, email, phone, selected_courses)
                             
-                            # ✅ FIX: THEN SEND VERIFICATION
-                            verification_code = student_manager.generate_verification_code()
-                            student_manager.save_verification_code(email, verification_code)
-                            
-                            st.success(f"✅ Student registered successfully!")
-                            st.info(f"""
-                            **Student ID:** {student_id}  
-                            **Name:** {name}  
-                            **Courses:** {', '.join(selected_courses)}
-                            
-                            📧 Verification code sent to: {email}
-                            """)
-                            
-                            # ✅ FIX: SHOW VERIFICATION SECTION AFTER REGISTRATION
-                            st.markdown("---")
-                            st.subheader("📧 Verify Your Email")
-                            st.write("Check your email for the verification code and enter it below:")
-                            
-                            verify_code = st.text_input("Enter verification code:")
-                            if st.button("Verify Email"):
-                                if student_manager.verify_email_code(email, verify_code):
-                                    st.success("🎉 Email verified successfully! Your account is now active.")
-                                else:
-                                    st.error("❌ Invalid verification code. You can verify later from your student portal.")
-                            
-                            st.info("💡 *You can verify your email later from the Student Portal*")
+                            if auto_verify:
+                                # Auto-verify the email
+                                cursor = DB_CONN.cursor()
+                                cursor.execute('''
+                                    UPDATE students SET email_verified = TRUE WHERE student_id = ?
+                                ''', (student_id,))
+                                DB_CONN.commit()
+                                st.success(f"""
+                                ✅ Student registered successfully!
+                                
+                                **Student ID:** {student_id}  
+                                **Name:** {name}  
+                                **Courses:** {', '.join(selected_courses)}  
+                                **Email:** ✅ Verified
+                                """)
+                            else:
+                                # Send verification code
+                                verification_code = student_manager.generate_verification_code()
+                                student_manager.save_verification_code(email, verification_code)
+                                
+                                st.success(f"""
+                                ✅ Student registered successfully!
+                                
+                                **Student ID:** {student_id}  
+                                **Name:** {name}  
+                                **Courses:** {', '.join(selected_courses)}
+                                """)
+                                
+                                st.info(f"📧 **Verification Code:** {verification_code}")
+                                st.write("Share this code with the student to verify their email in the Student Portal.")
                     else:
                         st.error("Please fill all required fields (*)")
 
-        elif choice == "👥 Student Management":  # ✅ FIXED: Added colon
+        elif choice == "👥 Student Management":
             st.subheader("Student Management")
             
             students = student_manager.get_students()
             if students:
                 for student in students:
                     with st.expander(f"🎯 {student['name']} ({student['student_id']})"):
-                        col1, col2, col3 = st.columns(3)
+                        col1, col2 = st.columns(2)
                         
                         with col1:
                             st.write("**Personal Info**")
-                            st.write(f"Email: {student['email']}")
-                            st.write(f"Phone: {student['phone']}")
-                            st.write(f"Status: {student['status']}")
-                            st.write(f"Verified: {'✅' if student['email_verified'] else '❌'}")
+                            st.write(f"**Email:** {student['email']}")
+                            st.write(f"**Phone:** {student['phone']}")
+                            st.write(f"**Status:** {student['status']}")
+                            st.write(f"**Verified:** {'✅ Yes' if student['email_verified'] else '❌ No'}")
                         
                         with col2:
                             st.write("**Courses & Progress**")
                             for course in student['courses']:
                                 progress = student['progress'][course]
                                 grade = student['grades'][course]
-                                st.write(f"• {course}: {progress} | {grade}")
-                        
-                        with col3:
-                            st.write("**Actions**")
-                            if st.button("Edit", key=f"edit_{student['student_id']}"):
-                                st.session_state.editing_student = student['student_id']
-                            if st.button("Add Course", key=f"add_{student['student_id']}"):
-                                st.session_state.adding_course = student['student_id']
+                                st.write(f"• **{course}:** {progress} | {grade}")
 
-        elif choice == "📚 Course Materials":  # ✅ FIXED: Added colon
+        elif choice == "📚 Course Materials":
             st.subheader("Course Materials Management")
             
             selected_course = st.selectbox("Select Course", COURSES)
@@ -542,7 +709,7 @@ class QuizManager:
                                     st.success("Material deleted!")
                                     st.rerun()
 
-        elif choice == "🎯 Quiz Management":  # ✅ FIXED: Added colon
+        elif choice == "🎯 Quiz Management":
             st.subheader("Quiz Management")
             
             tab1, tab2 = st.tabs(["➕ Create Quiz", "📋 Manage Quizzes"])
@@ -604,14 +771,6 @@ class QuizManager:
                             st.write(f"**Questions:** {len(quiz['questions'])}")
                             st.write(f"**Created:** {quiz['created_date'][:16]}")
                             st.write(f"**Status:** {'✅ Active' if quiz['is_active'] else '❌ Inactive'}")
-                            
-                            if st.button(f"{'Deactivate' if quiz['is_active'] else 'Activate'}", key=f"toggle_{quiz['quiz_id']}"):
-                                cursor = DB_CONN.cursor()
-                                cursor.execute('''
-                                    UPDATE quizzes SET is_active = ? WHERE quiz_id = ?
-                                ''', (not quiz['is_active'], quiz['quiz_id']))
-                                DB_CONN.commit()
-                                st.rerun()
 
     # STUDENT SECTIONS
     else:
@@ -632,7 +791,22 @@ class QuizManager:
                         completed = sum(1 for course in student['courses'] if student['progress'][course] == '100%')
                         st.metric("Completed", completed)
                     with col3:
-                        st.metric("Email Status", "Verified" if student['email_verified'] else "Pending")
+                        email_status = "✅ Verified" if student['email_verified'] else "❌ Pending"
+                        st.metric("Email Status", email_status)
+                    
+                    # Email verification section
+                    if not student['email_verified']:
+                        st.markdown("---")
+                        st.subheader("📧 Verify Your Email")
+                        st.warning("Your email is not verified. Please verify to access all features.")
+                        
+                        verification_code = st.text_input("Enter verification code:")
+                        if st.button("Verify Email"):
+                            if student_manager.verify_email_code(student['email'], verification_code):
+                                st.success("✅ Email verified successfully!")
+                                st.rerun()
+                            else:
+                                st.error("❌ Invalid verification code!")
                     
                     # Course progress
                     st.subheader("📚 Your Course Progress")
@@ -647,6 +821,8 @@ class QuizManager:
                             Status: {'✅ Completed' if progress == '100%' else '📚 In Progress'}
                         </div>
                         """, unsafe_allow_html=True)
+                else:
+                    st.error("Student ID not found. Please check your ID.")
 
         elif choice == "📖 Learning Materials":
             student_id = st.text_input("Enter Your Student ID")
@@ -711,6 +887,36 @@ class QuizManager:
                                 st.rerun()
                     else:
                         st.info("No quizzes available for your courses yet.")
+
+        elif choice == "📊 My Results":
+            student_id = st.text_input("Enter Your Student ID")
+            if student_id:
+                student = student_manager.search_student(student_id)
+                if student:
+                    st.subheader("Your Quiz Results")
+                    
+                    results = quiz_manager.get_student_results(student_id)
+                    if results:
+                        for result in results:
+                            st.write(f"**{result['quiz_title']}** ({result['course']})")
+                            st.write(f"Score: {result['score']}/{result['total_questions']} ({result['percentage']:.1f}%)")
+                            st.write(f"Completed: {result['completed_date'][:16]}")
+                            st.write("---")
+                    else:
+                        st.info("No quiz results yet.")
+
+        elif choice == "📞 Contact Support":
+            st.subheader("Contact Cre8Learn Institute")
+            st.info("""
+            **Institute Information:**
+            - **Business Registration:** A2025/28312
+            - **Location:** Maseru, Lesotho
+            
+            **Support Channels:**
+            - 📧 Email: support@cre8learn.com
+            - 📞 Phone: +266 1234 5678
+            - 🕒 Hours: Mon-Fri, 8AM-5PM
+            """)
 
 if __name__ == "__main__":
     main()
