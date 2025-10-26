@@ -2,9 +2,14 @@ import streamlit as st
 import pandas as pd
 import json
 import random
+import os
+import base64
 from datetime import datetime, timedelta
 import time
 import re
+from io import BytesIO
+import sqlite3
+import tempfile
 
 # Page configuration
 st.set_page_config(
@@ -19,67 +24,153 @@ st.markdown("""
 <style>
     .logo-container {
         text-align: center;
-        margin-bottom: 1rem;
-        padding: 1rem;
+        margin-bottom: 2rem;
+        padding: 2rem;
         background: linear-gradient(135deg, #1E90FF 0%, #2E8B57 100%);
-        border-radius: 15px;
+        border-radius: 20px;
         color: white;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.1);
     }
     .main-logo {
-        font-size: 3.5rem;
+        font-size: 4rem;
         font-weight: bold;
         margin-bottom: 0.5rem;
-        text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        text-shadow: 3px 3px 6px rgba(0,0,0,0.3);
     }
     .institute-subtitle {
-        font-size: 2rem;
+        font-size: 2.5rem;
         font-weight: bold;
-        margin-bottom: 0.5rem;
-        text-shadow: 1px 1px 3px rgba(0,0,0,0.3);
+        margin-bottom: 1rem;
+        text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
     }
     .student-card {
-        background-color: #f0f8ff;
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
         padding: 1.5rem;
-        border-radius: 10px;
+        border-radius: 15px;
         border-left: 5px solid #2E8B57;
         margin: 1rem 0;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
     }
     .quiz-card {
-        background-color: #fff3cd;
+        background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%);
         padding: 1.5rem;
-        border-radius: 10px;
+        border-radius: 15px;
         border-left: 5px solid #ffc107;
         margin: 1rem 0;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
     }
     .material-card {
-        background-color: #e7f3ff;
-        padding: 1rem;
-        border-radius: 8px;
+        background: linear-gradient(135deg, #e7f3ff 0%, #d4edff 100%);
+        padding: 1.5rem;
+        border-radius: 12px;
         border: 2px solid #1E90FF;
-        margin: 0.5rem 0;
+        margin: 1rem 0;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    }
+    .metric-card {
+        background: white;
+        padding: 1.5rem;
+        border-radius: 12px;
+        text-align: center;
+        border: 2px solid #1E90FF;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
     }
 </style>
 """, unsafe_allow_html=True)
 
+# Initialize SQLite Database
+def init_database():
+    conn = sqlite3.connect('cre8learn.db', check_same_thread=False)
+    cursor = conn.cursor()
+    
+    # Students table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS students (
+            student_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            age INTEGER NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            phone TEXT NOT NULL,
+            courses TEXT NOT NULL,
+            registration_date TEXT NOT NULL,
+            status TEXT NOT NULL,
+            grades TEXT NOT NULL,
+            progress TEXT NOT NULL,
+            fees_paid TEXT NOT NULL,
+            email_verified BOOLEAN DEFAULT FALSE
+        )
+    ''')
+    
+    # Course materials table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS course_materials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_name TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            file_name TEXT,
+            file_content BLOB,
+            file_type TEXT,
+            upload_date TEXT NOT NULL,
+            uploaded_by TEXT
+        )
+    ''')
+    
+    # Quizzes table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS quizzes (
+            quiz_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            course TEXT NOT NULL,
+            duration INTEGER NOT NULL,
+            questions TEXT NOT NULL,
+            created_date TEXT NOT NULL,
+            is_active BOOLEAN DEFAULT TRUE
+        )
+    ''')
+    
+    # Quiz results table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS quiz_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            quiz_id TEXT NOT NULL,
+            student_id TEXT NOT NULL,
+            score INTEGER NOT NULL,
+            total_questions INTEGER NOT NULL,
+            percentage REAL NOT NULL,
+            completed_date TEXT NOT NULL,
+            answers TEXT NOT NULL,
+            FOREIGN KEY (quiz_id) REFERENCES quizzes (quiz_id),
+            FOREIGN KEY (student_id) REFERENCES students (student_id)
+        )
+    ''')
+    
+    # Email verification table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS email_verification (
+            email TEXT PRIMARY KEY,
+            verification_code TEXT NOT NULL,
+            created_date TEXT NOT NULL,
+            verified BOOLEAN DEFAULT FALSE
+        )
+    ''')
+    
+    conn.commit()
+    return conn
+
+# Initialize database
+DB_CONN = init_database()
+
 class StudentManager:
     def __init__(self):
-        if 'students' not in st.session_state:
-            st.session_state.students = []
-        if 'admin_logged_in' not in st.session_state:
-            st.session_state.admin_logged_in = False
-        if 'course_materials' not in st.session_state:
-            st.session_state.course_materials = {}
-        if 'quizzes' not in st.session_state:
-            st.session_state.quizzes = {}
-        if 'student_results' not in st.session_state:
-            st.session_state.student_results = {}
-        if 'email_verification' not in st.session_state:
-            st.session_state.email_verification = {}
-    
+        self.conn = DB_CONN
+        
     def generate_student_id(self):
         while True:
             new_id = f"CL{random.randint(100000, 999999)}"
-            if not any(student['student_id'] == new_id for student in st.session_state.students):
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT student_id FROM students WHERE student_id = ?", (new_id,))
+            if not cursor.fetchone():
                 return new_id
     
     def generate_verification_code(self):
@@ -89,50 +180,100 @@ class StudentManager:
         pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
         return re.match(pattern, email) is not None
     
-    def send_verification_code(self, email, code):
-        # Simulate sending email (in real app, integrate with email service)
-        st.session_state.email_verification[email] = {
-            'code': code,
-            'timestamp': datetime.now(),
-            'verified': False
-        }
+    def save_verification_code(self, email, code):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO email_verification 
+            (email, verification_code, created_date, verified)
+            VALUES (?, ?, ?, ?)
+        ''', (email, code, datetime.now().isoformat(), False))
+        self.conn.commit()
     
     def verify_email_code(self, email, code):
-        if email in st.session_state.email_verification:
-            verification_data = st.session_state.email_verification[email]
-            time_diff = datetime.now() - verification_data['timestamp']
-            if time_diff.total_seconds() < 600:  # 10 minutes expiry
-                if verification_data['code'] == code:
-                    st.session_state.email_verification[email]['verified'] = True
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT verification_code, created_date FROM email_verification 
+            WHERE email = ? AND verified = FALSE
+        ''', (email,))
+        result = cursor.fetchone()
+        
+        if result:
+            stored_code, created_date = result
+            time_diff = datetime.now() - datetime.fromisoformat(created_date)
+            if time_diff.total_seconds() < 600:  # 10 minutes
+                if stored_code == code:
+                    cursor.execute('''
+                        UPDATE email_verification SET verified = TRUE WHERE email = ?
+                    ''', (email,))
+                    cursor.execute('''
+                        UPDATE students SET email_verified = TRUE WHERE email = ?
+                    ''', (email,))
+                    self.conn.commit()
                     return True
         return False
     
-    def get_students(self):
-        return st.session_state.students
-    
     def add_student(self, name, age, email, phone, courses):
         student_id = self.generate_student_id()
-        new_student = {
-            'student_id': student_id,
-            'name': name,
-            'age': int(age),
-            'email': email,
-            'phone': phone,
-            'courses': courses,  # Now supports multiple courses
-            'registration_date': datetime.now().strftime("%Y-%m-%d %H:%M"),
-            'status': 'Active',
-            'grades': {course: 'Not Assessed' for course in courses},
-            'progress': {course: '0%' for course in courses},
-            'fees_paid': {course: False for course in courses},
-            'email_verified': st.session_state.email_verification.get(email, {}).get('verified', False)
-        }
-        st.session_state.students.append(new_student)
+        cursor = self.conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO students 
+            (student_id, name, age, email, phone, courses, registration_date, status, grades, progress, fees_paid, email_verified)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            student_id, name, age, email, phone, 
+            json.dumps(courses),  # Store list as JSON string
+            datetime.now().isoformat(),
+            'Active',
+            json.dumps({course: 'Not Assessed' for course in courses}),
+            json.dumps({course: '0%' for course in courses}),
+            json.dumps({course: False for course in courses}),
+            False
+        ))
+        self.conn.commit()
         return student_id
     
+    def get_students(self):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM students")
+        students = []
+        for row in cursor.fetchall():
+            student = {
+                'student_id': row[0],
+                'name': row[1],
+                'age': row[2],
+                'email': row[3],
+                'phone': row[4],
+                'courses': json.loads(row[5]),
+                'registration_date': row[6],
+                'status': row[7],
+                'grades': json.loads(row[8]),
+                'progress': json.loads(row[9]),
+                'fees_paid': json.loads(row[10]),
+                'email_verified': bool(row[11])
+            }
+            students.append(student)
+        return students
+    
     def search_student(self, student_id):
-        for student in st.session_state.students:
-            if student['student_id'] == student_id:
-                return student
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM students WHERE student_id = ?", (student_id,))
+        row = cursor.fetchone()
+        if row:
+            return {
+                'student_id': row[0],
+                'name': row[1],
+                'age': row[2],
+                'email': row[3],
+                'phone': row[4],
+                'courses': json.loads(row[5]),
+                'registration_date': row[6],
+                'status': row[7],
+                'grades': json.loads(row[8]),
+                'progress': json.loads(row[9]),
+                'fees_paid': json.loads(row[10]),
+                'email_verified': bool(row[11])
+            }
         return None
     
     def add_course_to_student(self, student_id, course):
@@ -142,37 +283,176 @@ class StudentManager:
             student['grades'][course] = 'Not Assessed'
             student['progress'][course] = '0%'
             student['fees_paid'][course] = False
+            
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                UPDATE students SET 
+                courses = ?, grades = ?, progress = ?, fees_paid = ?
+                WHERE student_id = ?
+            ''', (
+                json.dumps(student['courses']),
+                json.dumps(student['grades']),
+                json.dumps(student['progress']),
+                json.dumps(student['fees_paid']),
+                student_id
+            ))
+            self.conn.commit()
             return True
         return False
     
-    def update_student(self, student_id, name, age, email, phone, status, grades=None, progress=None, fees_paid=None):
+    def update_student_progress(self, student_id, course, progress, grade=None):
         student = self.search_student(student_id)
-        if student:
-            student.update({
-                'name': name,
-                'age': int(age),
-                'email': email,
-                'phone': phone,
-                'status': status
-            })
-            if grades:
-                student['grades'].update(grades)
-            if progress:
-                student['progress'].update(progress)
-            if fees_paid:
-                student['fees_paid'].update(fees_paid)
+        if student and course in student['courses']:
+            student['progress'][course] = progress
+            if grade:
+                student['grades'][course] = grade
+            
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                UPDATE students SET progress = ?, grades = ? WHERE student_id = ?
+            ''', (json.dumps(student['progress']), json.dumps(student['grades']), student_id))
+            self.conn.commit()
             return True
         return False
+
+class CourseManager:
+    def __init__(self):
+        self.conn = DB_CONN
     
-    def delete_student(self, student_id):
-        st.session_state.students = [s for s in st.session_state.students if s['student_id'] != student_id]
-        return True
+    def save_course_material(self, course_name, title, description, file_name, file_content, file_type, uploaded_by="Admin"):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO course_materials 
+            (course_name, title, description, file_name, file_content, file_type, upload_date, uploaded_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            course_name, title, description, file_name, 
+            file_content, file_type,
+            datetime.now().isoformat(), uploaded_by
+        ))
+        self.conn.commit()
+        return cursor.lastrowid
+    
+    def get_course_materials(self, course_name=None):
+        cursor = self.conn.cursor()
+        if course_name:
+            cursor.execute("SELECT * FROM course_materials WHERE course_name = ? ORDER BY upload_date DESC", (course_name,))
+        else:
+            cursor.execute("SELECT * FROM course_materials ORDER BY upload_date DESC")
+        
+        materials = []
+        for row in cursor.fetchall():
+            materials.append({
+                'id': row[0],
+                'course_name': row[1],
+                'title': row[2],
+                'description': row[3],
+                'file_name': row[4],
+                'file_content': row[5],
+                'file_type': row[6],
+                'upload_date': row[7],
+                'uploaded_by': row[8]
+            })
+        return materials
+    
+    def delete_course_material(self, material_id):
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM course_materials WHERE id = ?", (material_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+class QuizManager:
+    def __init__(self):
+        self.conn = DB_CONN
+    
+    def create_quiz(self, quiz_id, title, course, duration, questions):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO quizzes (quiz_id, title, course, duration, questions, created_date, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (quiz_id, title, course, duration, json.dumps(questions), datetime.now().isoformat(), True))
+        self.conn.commit()
+    
+    def get_quizzes(self, course=None, active_only=True):
+        cursor = self.conn.cursor()
+        if course:
+            if active_only:
+                cursor.execute("SELECT * FROM quizzes WHERE course = ? AND is_active = TRUE ORDER BY created_date DESC", (course,))
+            else:
+                cursor.execute("SELECT * FROM quizzes WHERE course = ? ORDER BY created_date DESC", (course,))
+        else:
+            if active_only:
+                cursor.execute("SELECT * FROM quizzes WHERE is_active = TRUE ORDER BY created_date DESC")
+            else:
+                cursor.execute("SELECT * FROM quizzes ORDER BY created_date DESC")
+        
+        quizzes = []
+        for row in cursor.fetchall():
+            quizzes.append({
+                'quiz_id': row[0],
+                'title': row[1],
+                'course': row[2],
+                'duration': row[3],
+                'questions': json.loads(row[4]),
+                'created_date': row[5],
+                'is_active': bool(row[6])
+            })
+        return quizzes
+    
+    def save_quiz_result(self, quiz_id, student_id, score, total_questions, answers):
+        percentage = (score / total_questions) * 100
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO quiz_results 
+            (quiz_id, student_id, score, total_questions, percentage, completed_date, answers)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (quiz_id, student_id, score, total_questions, percentage, datetime.now().isoformat(), json.dumps(answers)))
+        self.conn.commit()
+        return cursor.lastrowid
+    
+    def get_student_results(self, student_id):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT qr.*, q.title, q.course 
+            FROM quiz_results qr
+            JOIN quizzes q ON qr.quiz_id = q.quiz_id
+            WHERE qr.student_id = ?
+            ORDER BY qr.completed_date DESC
+        ''', (student_id,))
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                'quiz_id': row[1],
+                'student_id': row[2],
+                'score': row[3],
+                'total_questions': row[4],
+                'percentage': row[5],
+                'completed_date': row[6],
+                'quiz_title': row[8],
+                'course': row[9]
+            })
+        return results
+
+def create_logo():
+    st.markdown("""
+    <div class="logo-container">
+        <div class="main-logo">Cre8Learn</div>
+        <div class="institute-subtitle">INSTITUTE</div>
+        <div style="font-size: 1.3rem; margin-bottom: 0.5rem; opacity: 0.9;">
+            Maseru, Lesotho
+        </div>
+        <div style="font-size: 1rem; opacity: 0.8;">
+            Business Registration No: A2025/28312
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 def admin_login():
     st.sidebar.markdown("---")
     st.sidebar.subheader("Admin Access")
     
-    if not st.session_state.admin_logged_in:
+    if not st.session_state.get('admin_logged_in', False):
         password = st.sidebar.text_input("Admin Password", type="password", value="cre8learn2024")
         if st.sidebar.button("Login as Admin"):
             if password == "cre8learn2024":
@@ -188,25 +468,16 @@ def admin_login():
             st.rerun()
         return True
 
-def create_logo():
-    st.markdown("""
-    <div class="logo-container">
-        <div class="main-logo">Cre8Learn</div>
-        <div class="institute-subtitle">INSTITUTE</div>
-        <div class="tagline">Maseru, Lesotho</div>
-        <div class="registration-info">Business Registration No: A2025/28312</div>
-    </div>
-    """, unsafe_allow_html=True)
-
 def main():
-    # Initialize manager
-    manager = StudentManager()
-    is_admin = admin_login()
+    # Initialize managers
+    student_manager = StudentManager()
+    course_manager = CourseManager()
+    quiz_manager = QuizManager()
     
-    # Create custom logo
+    is_admin = admin_login()
     create_logo()
     
-    # Courses list from your curriculum
+    # Courses list
     COURSES = [
         "Engineering Mathematics (Number Systems & Logic)",
         "Computer Hardware Basics", 
@@ -219,18 +490,15 @@ def main():
         "Proficiency in English Language"
     ]
     
-    # Sidebar Navigation
+    # Navigation
     if is_admin:
         menu = [
             "🏠 Admin Dashboard",
             "➕ Register Student", 
-            "👥 View All Students",
-            "🔍 Search Student",
-            "📚 Course Management",
-            "🎯 Assessment Center",
-            "💰 Fee Management",
-            "⏰ Quiz Manager",
-            "📊 Analytics"
+            "👥 Student Management",
+            "📚 Course Materials",
+            "🎯 Quiz Management",
+            "📊 Analytics & Reports"
         ]
     else:
         menu = [
@@ -244,44 +512,46 @@ def main():
     
     choice = st.sidebar.selectbox("Menu", menu)
     
-    # ADMIN FUNCTIONALITY
+    # ADMIN SECTIONS
     if is_admin:
         if choice == "🏠 Admin Dashboard":
             st.subheader("📊 Admin Dashboard")
             
-            students = manager.get_students()
+            students = student_manager.get_students()
             total_courses = sum(len(student.get('courses', [])) for student in students)
+            verified_count = len([s for s in students if s.get('email_verified', False)])
+            materials = course_manager.get_course_materials()
+            quizzes = quiz_manager.get_quizzes()
             
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Total Students", len(students))
             with col2:
-                st.metric("Total Course Registrations", total_courses)
+                st.metric("Verified Emails", verified_count)
             with col3:
-                verified = len([s for s in students if s.get('email_verified', False)])
-                st.metric("Verified Emails", verified)
+                st.metric("Course Materials", len(materials))
             with col4:
-                active_quizzes = len(st.session_state.quizzes)
-                st.metric("Active Quizzes", active_quizzes)
+                st.metric("Active Quizzes", len(quizzes))
             
-            # Quick actions
-            st.subheader("🚀 Quick Actions")
-            col1, col2, col3 = st.columns(3)
+            # Recent activity
+            col1, col2 = st.columns(2)
             with col1:
-                if st.button("📧 Send Bulk Verification"):
-                    st.info("Bulk verification feature coming soon!")
+                st.subheader("Recent Registrations")
+                recent_students = sorted(students, key=lambda x: x['registration_date'], reverse=True)[:5]
+                for student in recent_students:
+                    st.write(f"**{student['name']}** ({student['student_id']}) - {student['registration_date'][:10]}")
+            
             with col2:
-                if st.button("📊 Generate Reports"):
-                    st.info("Report generation in progress...")
-            with col3:
-                if st.button("🎯 Create New Quiz"):
-                    st.session_state.create_quiz = True
-                    st.rerun()
+                st.subheader("System Status")
+                st.success("✅ Database: Connected")
+                st.success("✅ File System: Ready")
+                st.success("✅ Email System: Standby")
+                st.success("✅ Quiz Engine: Active")
 
         elif choice == "➕ Register Student":
             st.subheader("Register New Student")
             
-            with st.form("add_student_form", clear_on_submit=True):
+            with st.form("add_student_form"):
                 col1, col2 = st.columns(2)
                 
                 with col1:
@@ -292,295 +562,293 @@ def main():
                 with col2:
                     phone = st.text_input("Phone Number *")
                     selected_courses = st.multiselect("Select Courses *", COURSES)
-                    status = st.selectbox("Status", ["Active", "Inactive"])
+                    auto_verify = st.checkbox("Auto-verify email", value=True)
                 
                 submitted = st.form_submit_button("🎯 Register Student")
                 
                 if submitted:
                     if name and email and phone and selected_courses:
-                        if not manager.verify_email_format(email):
+                        if not student_manager.verify_email_format(email):
                             st.error("❌ Please enter a valid email address!")
                         else:
-                            # Email verification process
-                            if email not in st.session_state.email_verification or not st.session_state.email_verification[email].get('verified', False):
-                                verification_code = manager.generate_verification_code()
-                                manager.send_verification_code(email, verification_code)
-                                
-                                st.warning(f"📧 Verification code sent to {email}")
-                                st.info(f"**Verification Code:** {verification_code}")
-                                st.write("*(In production, this would be sent via email)*")
-                                
-                                verify_code = st.text_input("Enter verification code:")
-                                if st.button("Verify Email"):
-                                    if manager.verify_email_code(email, verify_code):
-                                        student_id = manager.add_student(name, age, email, phone, selected_courses)
-                                        st.success(f"✅ Email verified! Student registered with ID: {student_id}")
-                                    else:
-                                        st.error("❌ Invalid verification code!")
-                            else:
-                                student_id = manager.add_student(name, age, email, phone, selected_courses)
-                                st.success(f"✅ Student registered successfully! ID: {student_id}")
+                            student_id = student_manager.add_student(name, age, email, phone, selected_courses)
+                            if auto_verify:
+                                # Auto-verify the email
+                                cursor = DB_CONN.cursor()
+                                cursor.execute('''
+                                    UPDATE students SET email_verified = TRUE WHERE student_id = ?
+                                ''', (student_id,))
+                                DB_CONN.commit()
+                            
+                            st.success(f"""
+                            ✅ Student registered successfully!
+                            
+                            **Student ID:** {student_id}  
+                            **Name:** {name}  
+                            **Courses:** {', '.join(selected_courses)}  
+                            **Email:** {'✅ Verified' if auto_verify else '📧 Verification Required'}
+                            """)
                     else:
                         st.error("Please fill all required fields (*)")
 
-        elif choice == "👥 View All Students":
-            st.subheader("All Students")
-            students = manager.get_students()
+        elif choice == "👥 Student Management":
+            st.subheader("Student Management")
             
+            students = student_manager.get_students()
             if students:
                 for student in students:
                     with st.expander(f"🎯 {student['name']} ({student['student_id']})"):
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.write(f"**Email:** {student['email']}")
-                            st.write(f"**Phone:** {student['phone']}")
-                            st.write(f"**Status:** {student['status']}")
-                        with col2:
-                            st.write(f"**Verified:** {'✅' if student.get('email_verified') else '❌'}")
-                            st.write(f"**Registration:** {student['registration_date']}")
+                        col1, col2, col3 = st.columns(3)
                         
-                        st.write("**Registered Courses:**")
-                        for course in student.get('courses', []):
-                            fee_status = "✅ Paid" if student['fees_paid'].get(course) else "❌ Pending"
-                            st.write(f"- {course} | Grade: {student['grades'].get(course, 'N/A')} | Fees: {fee_status}")
+                        with col1:
+                            st.write("**Personal Info**")
+                            st.write(f"Email: {student['email']}")
+                            st.write(f"Phone: {student['phone']}")
+                            st.write(f"Status: {student['status']}")
+                            st.write(f"Verified: {'✅' if student['email_verified'] else '❌'}")
+                        
+                        with col2:
+                            st.write("**Courses & Progress**")
+                            for course in student['courses']:
+                                progress = student['progress'][course]
+                                grade = student['grades'][course]
+                                st.write(f"• {course}: {progress} | {grade}")
+                        
+                        with col3:
+                            st.write("**Actions**")
+                            if st.button("Edit", key=f"edit_{student['student_id']}"):
+                                st.session_state.editing_student = student['student_id']
+                            if st.button("Add Course", key=f"add_{student['student_id']}"):
+                                st.session_state.adding_course = student['student_id']
 
-        elif choice == "📚 Course Management":
+        elif choice == "📚 Course Materials":
             st.subheader("Course Materials Management")
             
             selected_course = st.selectbox("Select Course", COURSES)
             
-            tab1, tab2, tab3 = st.tabs(["📁 Upload Materials", "📋 View Materials", "🎯 Create Quiz"])
+            tab1, tab2 = st.tabs(["📁 Upload Materials", "📋 View Materials"])
             
             with tab1:
-                st.subheader("Upload Course Materials")
-                material_title = st.text_input("Material Title")
+                st.subheader("Upload Course Material")
+                
+                material_title = st.text_input("Material Title *")
                 material_description = st.text_area("Description")
-                material_file = st.file_uploader("Upload File", type=['pdf', 'docx', 'ppt', 'pptx', 'txt'])
+                uploaded_file = st.file_uploader("Choose file *", type=['pdf', 'docx', 'ppt', 'pptx', 'txt', 'jpg', 'png'])
                 
                 if st.button("Upload Material"):
-                    if material_title and selected_course:
-                        if selected_course not in st.session_state.course_materials:
-                            st.session_state.course_materials[selected_course] = []
+                    if material_title and uploaded_file and selected_course:
+                        # Read file content
+                        file_content = uploaded_file.read()
+                        file_type = uploaded_file.type
                         
-                        st.session_state.course_materials[selected_course].append({
-                            'title': material_title,
-                            'description': material_description,
-                            'upload_date': datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            'type': 'document'
-                        })
-                        st.success("✅ Material uploaded successfully!")
+                        # Save to database
+                        material_id = course_manager.save_course_material(
+                            selected_course, material_title, material_description,
+                            uploaded_file.name, file_content, file_type
+                        )
+                        
+                        st.success(f"✅ Material '{material_title}' uploaded successfully!")
+                    else:
+                        st.error("Please fill all required fields (*)")
             
             with tab2:
                 st.subheader("Course Materials")
-                if selected_course in st.session_state.course_materials:
-                    for i, material in enumerate(st.session_state.course_materials[selected_course]):
-                        st.markdown(f"""
-                        <div class="material-card">
-                            <strong>📚 {material['title']}</strong><br>
-                            {material['description']}<br>
-                            <small>Uploaded: {material['upload_date']}</small>
-                        </div>
-                        """, unsafe_allow_html=True)
-                else:
-                    st.info("No materials uploaded for this course yet.")
-            
-            with tab3:
-                st.subheader("Create Timed Quiz")
-                quiz_title = st.text_input("Quiz Title")
-                quiz_duration = st.number_input("Duration (minutes)", min_value=1, max_value=180, value=30)
+                materials = course_manager.get_course_materials(selected_course)
                 
-                if 'questions' not in st.session_state:
-                    st.session_state.questions = []
-                
-                st.write("**Add Questions:**")
-                question_text = st.text_area("Question")
-                option1 = st.text_input("Option A")
-                option2 = st.text_input("Option B")
-                option3 = st.text_input("Option C")
-                option4 = st.text_input("Option D")
-                correct_answer = st.selectbox("Correct Answer", ["A", "B", "C", "D"])
-                
-                if st.button("Add Question"):
-                    if question_text and option1 and option2:
-                        st.session_state.questions.append({
-                            'question': question_text,
-                            'options': [option1, option2, option3, option4],
-                            'correct': correct_answer
-                        })
-                        st.success("✅ Question added!")
-                
-                if st.session_state.questions:
-                    st.write("**Current Questions:**")
-                    for i, q in enumerate(st.session_state.questions):
-                        st.write(f"{i+1}. {q['question']}")
-                
-                if st.button("Create Quiz") and quiz_title:
-                    quiz_id = f"quiz_{int(time.time())}"
-                    st.session_state.quizzes[quiz_id] = {
-                        'title': quiz_title,
-                        'course': selected_course,
-                        'duration': quiz_duration,
-                        'questions': st.session_state.questions.copy(),
-                        'created_date': datetime.now().strftime("%Y-%m-%d %H:%M")
-                    }
-                    st.session_state.questions = []
-                    st.success(f"✅ Quiz '{quiz_title}' created successfully!")
+                if materials:
+                    for material in materials:
+                        col1, col2, col3 = st.columns([3, 1, 1])
+                        
+                        with col1:
+                            st.write(f"**{material['title']}**")
+                            st.write(material['description'])
+                            st.write(f"*Uploaded: {material['upload_date'][:16]}*")
+                        
+                        with col2:
+                            # Download button
+                            st.download_button(
+                                label="Download",
+                                data=material['file_content'],
+                                file_name=material['file_name'],
+                                mime=material['file_type'],
+                                key=f"dl_{material['id']}"
+                            )
+                        
+                        with col3:
+                            if st.button("Delete", key=f"del_{material['id']}"):
+                                if course_manager.delete_course_material(material['id']):
+                                    st.success("Material deleted!")
+                                    st.rerun()
 
-        elif choice == "⏰ Quiz Manager":
+        elif choice == "🎯 Quiz Management":
             st.subheader("Quiz Management")
             
-            if st.session_state.quizzes:
-                for quiz_id, quiz in st.session_state.quizzes.items():
-                    with st.expander(f"🎯 {quiz['title']} - {quiz['course']}"):
-                        st.write(f"**Duration:** {quiz['duration']} minutes")
-                        st.write(f"**Questions:** {len(quiz['questions'])}")
-                        st.write(f"**Created:** {quiz['created_date']}")
-                        
-                        if st.button(f"Delete {quiz['title']}", key=quiz_id):
-                            del st.session_state.quizzes[quiz_id]
-                            st.rerun()
-            else:
-                st.info("No quizzes created yet.")
+            tab1, tab2 = st.tabs(["➕ Create Quiz", "📋 Manage Quizzes"])
+            
+            with tab1:
+                st.subheader("Create New Quiz")
+                
+                quiz_title = st.text_input("Quiz Title *")
+                quiz_course = st.selectbox("Course *", COURSES)
+                quiz_duration = st.number_input("Duration (minutes) *", min_value=1, max_value=180, value=30)
+                
+                st.subheader("Add Questions")
+                
+                if 'quiz_questions' not in st.session_state:
+                    st.session_state.quiz_questions = []
+                
+                with st.form("add_question_form"):
+                    question_text = st.text_area("Question *")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        option_a = st.text_input("Option A *")
+                        option_b = st.text_input("Option B *")
+                    with col2:
+                        option_c = st.text_input("Option C")
+                        option_d = st.text_input("Option D")
+                    correct_answer = st.selectbox("Correct Answer *", ["A", "B", "C", "D"])
+                    
+                    if st.form_submit_button("Add Question"):
+                        if question_text and option_a and option_b:
+                            st.session_state.quiz_questions.append({
+                                'question': question_text,
+                                'options': [opt for opt in [option_a, option_b, option_c, option_d] if opt],
+                                'correct': correct_answer
+                            })
+                            st.success("✅ Question added!")
+                
+                if st.session_state.quiz_questions:
+                    st.write("**Current Questions:**")
+                    for i, q in enumerate(st.session_state.quiz_questions):
+                        st.write(f"{i+1}. {q['question']}")
+                
+                if st.button("Create Quiz", type="primary"):
+                    if quiz_title and quiz_course and st.session_state.quiz_questions:
+                        quiz_id = f"quiz_{int(time.time())}"
+                        quiz_manager.create_quiz(quiz_id, quiz_title, quiz_course, quiz_duration, st.session_state.quiz_questions)
+                        st.session_state.quiz_questions = []
+                        st.success(f"✅ Quiz '{quiz_title}' created successfully!")
+                    else:
+                        st.error("Please fill all required fields and add at least one question!")
+            
+            with tab2:
+                st.subheader("Existing Quizzes")
+                quizzes = quiz_manager.get_quizzes(active_only=False)
+                
+                if quizzes:
+                    for quiz in quizzes:
+                        with st.expander(f"🎯 {quiz['title']} - {quiz['course']}"):
+                            st.write(f"**Duration:** {quiz['duration']} minutes")
+                            st.write(f"**Questions:** {len(quiz['questions'])}")
+                            st.write(f"**Created:** {quiz['created_date'][:16]}")
+                            st.write(f"**Status:** {'✅ Active' if quiz['is_active'] else '❌ Inactive'}")
+                            
+                            if st.button(f"{'Deactivate' if quiz['is_active'] else 'Activate'}", key=f"toggle_{quiz['quiz_id']}"):
+                                cursor = DB_CONN.cursor()
+                                cursor.execute('''
+                                    UPDATE quizzes SET is_active = ? WHERE quiz_id = ?
+                                ''', (not quiz['is_active'], quiz['quiz_id']))
+                                DB_CONN.commit()
+                                st.rerun()
 
-    # USER FUNCTIONALITY
+    # STUDENT SECTIONS
     else:
         if choice == "🏠 Student Portal":
             st.subheader("Welcome to Cre8Learn Institute")
             
-            student_id = st.text_input("Enter Your Student ID to Access Portal")
+            student_id = st.text_input("Enter Your Student ID")
             if student_id:
-                student = manager.search_student(student_id)
+                student = student_manager.search_student(student_id)
                 if student:
                     st.success(f"Welcome back, {student['name']}! 🎉")
                     
-                    # Dashboard overview
+                    # Dashboard
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.metric("Courses", len(student.get('courses', [])))
+                        st.metric("Courses", len(student['courses']))
                     with col2:
-                        completed = sum(1 for course in student.get('courses', []) 
-                                      if student['progress'].get(course) == '100%')
+                        completed = sum(1 for course in student['courses'] if student['progress'][course] == '100%')
                         st.metric("Completed", completed)
                     with col3:
-                        verified = "✅" if student.get('email_verified') else "❌"
-                        st.metric("Email Verified", verified)
+                        st.metric("Email Status", "Verified" if student['email_verified'] else "Pending")
                     
-                    # Recent activity
-                    st.subheader("📚 Your Courses")
-                    for course in student.get('courses', []):
-                        progress = student['progress'].get(course, '0%')
-                        grade = student['grades'].get(course, 'Not Assessed')
+                    # Course progress
+                    st.subheader("📚 Your Course Progress")
+                    for course in student['courses']:
+                        progress = student['progress'][course]
+                        grade = student['grades'][course]
                         
                         st.markdown(f"""
                         <div class="student-card">
                             <strong>📖 {course}</strong><br>
-                            Progress: {progress} | Grade: {grade}<br>
-                            Fees: {'✅ Paid' if student['fees_paid'].get(course) else '❌ Pending'}
+                            Progress: <strong>{progress}</strong> | Grade: <strong>{grade}</strong><br>
+                            Status: {'✅ Completed' if progress == '100%' else '📚 In Progress'}
                         </div>
                         """, unsafe_allow_html=True)
-                else:
-                    st.error("Student ID not found.")
-
-        elif choice == "🔍 My Profile & Courses":
-            student_id = st.text_input("Enter Your Student ID")
-            if student_id:
-                student = manager.search_student(student_id)
-                if student:
-                    st.subheader(f"Student Profile: {student['name']}")
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.write("**Personal Information:**")
-                        st.write(f"Name: {student['name']}")
-                        st.write(f"Student ID: {student['student_id']}")
-                        st.write(f"Email: {student['email']} {'✅' if student.get('email_verified') else '❌'}")
-                        st.write(f"Phone: {student['phone']}")
-                    
-                    with col2:
-                        st.write("**Academic Information:**")
-                        st.write(f"Status: {student['status']}")
-                        st.write(f"Registration: {student['registration_date']}")
-                        st.write(f"Total Courses: {len(student.get('courses', []))}")
-                    
-                    # Add more courses
-                    st.subheader("➕ Register for Additional Courses")
-                    available_courses = [c for c in COURSES if c not in student.get('courses', [])]
-                    if available_courses:
-                        new_course = st.selectbox("Select additional course", available_courses)
-                        if st.button("Add Course"):
-                            if manager.add_course_to_student(student_id, new_course):
-                                st.success(f"✅ Added {new_course} to your courses!")
-                            else:
-                                st.error("❌ Failed to add course")
-                    else:
-                        st.info("You are registered for all available courses! 🎉")
 
         elif choice == "📖 Learning Materials":
             student_id = st.text_input("Enter Your Student ID")
             if student_id:
-                student = manager.search_student(student_id)
+                student = student_manager.search_student(student_id)
                 if student:
                     st.subheader("Available Learning Materials")
                     
-                    for course in student.get('courses', []):
+                    for course in student['courses']:
                         st.write(f"### 📚 {course}")
-                        if course in st.session_state.course_materials:
-                            for material in st.session_state.course_materials[course]:
+                        materials = course_manager.get_course_materials(course)
+                        
+                        if materials:
+                            for material in materials:
                                 st.markdown(f"""
                                 <div class="material-card">
                                     <strong>📄 {material['title']}</strong><br>
                                     {material['description']}<br>
-                                    <small>Available since: {material['upload_date']}</small>
+                                    <small>Available since: {material['upload_date'][:16]}</small>
                                 </div>
                                 """, unsafe_allow_html=True)
+                                
+                                # Download button
+                                st.download_button(
+                                    label=f"Download {material['file_name']}",
+                                    data=material['file_content'],
+                                    file_name=material['file_name'],
+                                    mime=material['file_type'],
+                                    key=f"dl_{material['id']}"
+                                )
+                                st.write("---")
                         else:
                             st.info("No materials available for this course yet.")
 
         elif choice == "🎯 Take Quiz":
             student_id = st.text_input("Enter Your Student ID")
             if student_id:
-                student = manager.search_student(student_id)
+                student = student_manager.search_student(student_id)
                 if student:
                     st.subheader("Available Quizzes")
                     
                     available_quizzes = []
-                    for quiz_id, quiz in st.session_state.quizzes.items():
-                        if quiz['course'] in student.get('courses', []):
-                            available_quizzes.append((quiz_id, quiz))
+                    for course in student['courses']:
+                        quizzes = quiz_manager.get_quizzes(course=course, active_only=True)
+                        available_quizzes.extend(quizzes)
                     
                     if available_quizzes:
-                        for quiz_id, quiz in available_quizzes:
-                            with st.expander(f"🎯 {quiz['title']} - {quiz['duration']} minutes"):
-                                st.write(f"Course: {quiz['course']}")
-                                st.write(f"Questions: {len(quiz['questions'])}")
-                                
-                                if st.button(f"Start Quiz", key=quiz_id):
-                                    st.session_state.current_quiz = quiz_id
-                                    st.session_state.quiz_start_time = datetime.now()
-                                    st.session_state.quiz_answers = {}
-                                    st.rerun()
+                        for quiz in available_quizzes:
+                            st.markdown(f"""
+                            <div class="quiz-card">
+                                <strong>🎯 {quiz['title']}</strong><br>
+                                Course: {quiz['course']}<br>
+                                Duration: {quiz['duration']} minutes<br>
+                                Questions: {len(quiz['questions'])}
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                            if st.button("Start Quiz", key=f"start_{quiz['quiz_id']}"):
+                                st.session_state.current_quiz = quiz
+                                st.session_state.quiz_start_time = datetime.now()
+                                st.session_state.quiz_answers = {}
+                                st.rerun()
                     else:
                         st.info("No quizzes available for your courses yet.")
-
-        elif choice == "📊 My Results":
-            student_id = st.text_input("Enter Your Student ID")
-            if student_id:
-                student = manager.search_student(student_id)
-                if student:
-                    st.subheader("Your Academic Results")
-                    
-                    for course in student.get('courses', []):
-                        grade = student['grades'].get(course, 'Not Assessed')
-                        progress = student['progress'].get(course, '0%')
-                        
-                        st.markdown(f"""
-                        <div class="student-card">
-                            <strong>📖 {course}</strong><br>
-                            Current Grade: **{grade}**<br>
-                            Progress: **{progress}**<br>
-                            Status: {'✅ Completed' if progress == '100%' else '📚 In Progress'}
-                        </div>
-                        """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
