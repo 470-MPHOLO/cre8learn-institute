@@ -547,49 +547,60 @@ def main():
                 st.success("✅ File System: Ready")
                 st.success("✅ Email System: Standby")
                 st.success("✅ Quiz Engine: Active")
-
-        elif choice == "➕ Register Student":
-            st.subheader("Register New Student")
+elif choice == "➕ Register Student":
+    st.subheader("Register New Student")
+    
+    with st.form("add_student_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            name = st.text_input("Full Name *")
+            age = st.number_input("Age *", min_value=16, max_value=100, value=25)
+            email = st.text_input("Email *")
             
-            with st.form("add_student_form"):
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    name = st.text_input("Full Name *")
-                    age = st.number_input("Age *", min_value=16, max_value=100, value=25)
-                    email = st.text_input("Email *")
+        with col2:
+            phone = st.text_input("Phone Number *")
+            selected_courses = st.multiselect("Select Courses *", COURSES)
+            status = st.selectbox("Status", ["Active", "Inactive"])
+        
+        submitted = st.form_submit_button("🎯 Register Student")
+        
+        if submitted:
+            if name and email and phone and selected_courses:
+                if not student_manager.verify_email_format(email):
+                    st.error("❌ Please enter a valid email address!")
+                else:
+                    # ✅ FIX: REGISTER STUDENT FIRST
+                    student_id = student_manager.add_student(name, age, email, phone, selected_courses)
                     
-                with col2:
-                    phone = st.text_input("Phone Number *")
-                    selected_courses = st.multiselect("Select Courses *", COURSES)
-                    auto_verify = st.checkbox("Auto-verify email", value=True)
-                
-                submitted = st.form_submit_button("🎯 Register Student")
-                
-                if submitted:
-                    if name and email and phone and selected_courses:
-                        if not student_manager.verify_email_format(email):
-                            st.error("❌ Please enter a valid email address!")
+                    # ✅ FIX: THEN SEND VERIFICATION
+                    verification_code = student_manager.generate_verification_code()
+                    student_manager.save_verification_code(email, verification_code)
+                    
+                    st.success(f"✅ Student registered successfully!")
+                    st.info(f"""
+                    **Student ID:** {student_id}  
+                    **Name:** {name}  
+                    **Courses:** {', '.join(selected_courses)}
+                    
+                    📧 Verification code sent to: {email}
+                    """)
+                    
+                    # ✅ FIX: SHOW VERIFICATION SECTION AFTER REGISTRATION
+                    st.markdown("---")
+                    st.subheader("📧 Verify Your Email")
+                    st.write("Check your email for the verification code and enter it below:")
+                    
+                    verify_code = st.text_input("Enter verification code:")
+                    if st.button("Verify Email"):
+                        if student_manager.verify_email_code(email, verify_code):
+                            st.success("🎉 Email verified successfully! Your account is now active.")
                         else:
-                            student_id = student_manager.add_student(name, age, email, phone, selected_courses)
-                            if auto_verify:
-                                # Auto-verify the email
-                                cursor = DB_CONN.cursor()
-                                cursor.execute('''
-                                    UPDATE students SET email_verified = TRUE WHERE student_id = ?
-                                ''', (student_id,))
-                                DB_CONN.commit()
-                            
-                            st.success(f"""
-                            ✅ Student registered successfully!
-                            
-                            **Student ID:** {student_id}  
-                            **Name:** {name}  
-                            **Courses:** {', '.join(selected_courses)}  
-                            **Email:** {'✅ Verified' if auto_verify else '📧 Verification Required'}
-                            """)
-                    else:
-                        st.error("Please fill all required fields (*)")
+                            st.error("❌ Invalid verification code. You can verify later from your student portal.")
+                    
+                    st.info("💡 *You can verify your email later from the Student Portal*")
+            else:
+                st.error("Please fill all required fields (*)")
 
         elif choice == "👥 Student Management":
             st.subheader("Student Management")
